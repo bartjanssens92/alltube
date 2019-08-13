@@ -16,7 +16,7 @@ class Config
     /**
      * Singleton instance.
      *
-     * @var Config
+     * @var Config|null
      */
     private static $instance;
 
@@ -127,20 +127,96 @@ class Config
     private $file;
 
     /**
+     * Generic formats supported by youtube-dl.
+     *
+     * @var array
+     */
+    public $genericFormats = [];
+
+    /**
      * Config constructor.
      *
-     * @param array $options Options (see `config/config.example.yml` for available options)
+     * @param array $options Options
      */
-    public function __construct(array $options)
+    private function __construct(array $options = [])
     {
-        if (isset($options) && is_array($options)) {
-            foreach ($options as $option => $value) {
-                if (isset($this->$option) && isset($value)) {
-                    $this->$option = $value;
+        $this->applyOptions($options);
+        $this->getEnv();
+
+        if (empty($this->genericFormats)) {
+            // We don't put this in the class definition so it can be detected by xgettext.
+            $this->genericFormats = [
+                'best'                => _('Best'),
+                'bestvideo+bestaudio' => _('Remux best video with best audio'),
+                'worst'               => _('Worst'),
+            ];
+        }
+
+        foreach ($this->genericFormats as $format => $name) {
+            if (strpos($format, '+') !== false) {
+                if (!$this->remux) {
+                    // Disable combined formats if remux mode is not enabled.
+                    unset($this->genericFormats[$format]);
                 }
+            } elseif (!$this->stream) {
+                // Force HTTP if stream is not enabled.
+                $this->replaceGenericFormat($format, $format.'[protocol=https]/'.$format.'[protocol=http]');
             }
         }
-        $this->getEnv();
+    }
+
+    /**
+     * Replace a format key.
+     *
+     * @param string $oldFormat Old format
+     * @param string $newFormat New format
+     *
+     * @return void
+     */
+    private function replaceGenericFormat($oldFormat, $newFormat)
+    {
+        $keys = array_keys($this->genericFormats);
+        $keys[array_search($oldFormat, $keys)] = $newFormat;
+        if ($genericFormats = array_combine($keys, $this->genericFormats)) {
+            $this->genericFormats = $genericFormats;
+        }
+    }
+
+    /**
+     * Throw an exception if some of the options are invalid.
+     *
+     * @throws Exception If youtube-dl is missing
+     * @throws Exception If Python is missing
+     *
+     * @return void
+     */
+    private function validateOptions()
+    {
+        /*
+        We don't translate these exceptions because they usually occur before Slim can catch them
+        so they will go to the logs.
+         */
+        if (!is_file($this->youtubedl)) {
+            throw new Exception("Can't find youtube-dl at ".$this->youtubedl);
+        } elseif (!Video::checkCommand([$this->python, '--version'])) {
+            throw new Exception("Can't find Python at ".$this->python);
+        }
+    }
+
+    /**
+     * Apply the provided options.
+     *
+     * @param array $options Options
+     *
+     * @return void
+     */
+    private function applyOptions(array $options)
+    {
+        foreach ($options as $option => $value) {
+            if (isset($this->$option) && isset($value)) {
+                $this->$option = $value;
+            }
+        }
     }
 
     /**
@@ -161,32 +237,50 @@ class Config
     }
 
     /**
-     * Get Config singleton instance from YAML config file.
-     *
-     * @param string $yamlfile YAML config file name
+     * Get Config singleton instance.
      *
      * @return Config
      */
-    public static function getInstance($yamlfile = 'config/config.yml')
+    public static function getInstance()
     {
-        $yamlPath = __DIR__.'/../'.$yamlfile;
-        if (is_null(self::$instance) || self::$instance->file != $yamlfile) {
-            if (is_file($yamlfile)) {
-                $options = Yaml::parse(file_get_contents($yamlPath));
-            } elseif ($yamlfile == 'config/config.yml' || empty($yamlfile)) {
-                /*
-                Allow for the default file to be missing in order to
-                not surprise users that did not create a config file
-                 */
-                $options = [];
-            } else {
-                throw new Exception("Can't find config file at ".$yamlPath);
-            }
-            self::$instance = new self($options);
-            self::$instance->file = $yamlfile;
+        if (!isset(self::$instance)) {
+            self::$instance = new self();
         }
 
         return self::$instance;
+    }
+
+    /**
+     * Set options from a YAML file.
+     *
+     * @param string $file Path to the YAML file
+     */
+    public static function setFile($file)
+    {
+        if (is_file($file)) {
+            $options = Yaml::parse(file_get_contents($file));
+            self::$instance = new self($options);
+            self::$instance->validateOptions();
+        } else {
+            throw new Exception("Can't find config file at ".$file);
+        }
+    }
+
+    /**
+     * Manually set some options.
+     *
+     * @param array $options Options (see `config/config.example.yml` for available options)
+     * @param bool  $update  True to update an existing instance
+     */
+    public static function setOptions(array $options, $update = true)
+    {
+        if ($update) {
+            $config = self::getInstance();
+            $config->applyOptions($options);
+            $config->validateOptions();
+        } else {
+            self::$instance = new self($options);
+        }
     }
 
     /**

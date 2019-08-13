@@ -5,69 +5,28 @@
 
 namespace Alltube\Controller;
 
-use Alltube\Config;
-use Alltube\EmptyUrlException;
+use Alltube\Exception\PasswordException;
 use Alltube\Locale;
 use Alltube\LocaleManager;
-use Alltube\PasswordException;
-use Alltube\VideoDownload;
-use Aura\Session\Segment;
-use Aura\Session\SessionFactory;
+use Alltube\Video;
 use Exception;
-use GuzzleHttp\Client;
 use Psr\Container\ContainerInterface;
 use Slim\Container;
 use Slim\Http\Request;
 use Slim\Http\Response;
-use Slim\Http\Stream;
 use Slim\Views\Smarty;
 
 /**
  * Main controller.
  */
-class FrontController
+class FrontController extends BaseController
 {
-    /**
-     * Config instance.
-     *
-     * @var Config
-     */
-    private $config;
-
-    /**
-     * VideoDownload instance.
-     *
-     * @var VideoDownload
-     */
-    private $download;
-
-    /**
-     * Slim dependency container.
-     *
-     * @var ContainerInterface
-     */
-    private $container;
-
-    /**
-     * Session segment used to store session variables.
-     *
-     * @var Segment
-     */
-    private $sessionSegment;
-
     /**
      * Smarty view.
      *
      * @var Smarty
      */
     private $view;
-
-    /**
-     * Default youtube-dl format.
-     *
-     * @var string
-     */
-    private $defaultFormat = 'best[protocol^=http]';
 
     /**
      * LocaleManager instance.
@@ -77,31 +36,16 @@ class FrontController
     private $localeManager;
 
     /**
-     * FrontController constructor.
+     * BaseController constructor.
      *
-     * @param Container $container Slim dependency container
-     * @param Config    $config    Config instance
-     * @param array     $cookies   Cookie array
+     * @param ContainerInterface $container Slim dependency container
      */
-    public function __construct(ContainerInterface $container, Config $config = null, array $cookies = [])
+    public function __construct(ContainerInterface $container)
     {
-        if (isset($config)) {
-            $this->config = $config;
-        } else {
-            $this->config = Config::getInstance();
-        }
-        $this->download = new VideoDownload($this->config);
-        $this->container = $container;
-        $this->view = $this->container->get('view');
+        parent::__construct($container);
+
         $this->localeManager = $this->container->get('locale');
-        $session_factory = new SessionFactory();
-        $session = $session_factory->newInstance($cookies);
-        $this->sessionSegment = $session->getSegment(self::class);
-        if ($this->config->remux) {
-            $this->defaultFormat = 'bestvideo+bestaudio,best';
-        } elseif ($this->config->stream) {
-            $this->defaultFormat = 'best';
-        }
+        $this->view = $this->container->get('view');
     }
 
     /**
@@ -114,7 +58,7 @@ class FrontController
      */
     public function index(Request $request, Response $response)
     {
-        $uri = $request->getUri()->withUserInfo(null);
+        $uri = $request->getUri()->withUserInfo('');
         $this->view->render(
             $response,
             'index.tpl',
@@ -163,7 +107,7 @@ class FrontController
             'extractors.tpl',
             [
                 'config'      => $this->config,
-                'extractors'  => $this->download->listExtractors(),
+                'extractors'  => Video::getExtractors(),
                 'class'       => 'extractors',
                 'title'       => _('Supported websites'),
                 'description' => _('List of all supported websites from which Alltube Download '.
@@ -203,131 +147,44 @@ class FrontController
     }
 
     /**
-     * Return a converted MP3 file.
-     *
-     * @param Request  $request  PSR-7 request
-     * @param Response $response PSR-7 response
-     * @param array    $params   GET query parameters
-     * @param string   $password Video password
-     *
-     * @return Response HTTP response
-     */
-    private function getConvertedAudioResponse(Request $request, Response $response, array $params, $password = null)
-    {
-        if (!isset($params['from'])) {
-            $params['from'] = '';
-        }
-        if (!isset($params['to'])) {
-            $params['to'] = '';
-        }
-
-        $response = $response->withHeader(
-            'Content-Disposition',
-            'attachment; filename="'.
-            $this->download->getAudioFilename($params['url'], 'bestaudio/best', $password).'"'
-        );
-        $response = $response->withHeader('Content-Type', 'audio/mpeg');
-
-        if ($request->isGet() || $request->isPost()) {
-            try {
-                $process = $this->download->getAudioStream(
-                    $params['url'],
-                    'bestaudio/best',
-                    $password,
-                    $params['from'],
-                    $params['to']
-                );
-            } catch (Exception $e) {
-                $process = $this->download->getAudioStream(
-                    $params['url'],
-                    $this->defaultFormat,
-                    $password,
-                    $params['from'],
-                    $params['to']
-                );
-            }
-            $response = $response->withBody(new Stream($process));
-        }
-
-        return $response;
-    }
-
-    /**
-     * Return the MP3 file.
-     *
-     * @param Request  $request  PSR-7 request
-     * @param Response $response PSR-7 response
-     * @param array    $params   GET query parameters
-     * @param string   $password Video password
-     *
-     * @return Response HTTP response
-     */
-    private function getAudioResponse(Request $request, Response $response, array $params, $password = null)
-    {
-        try {
-            if (isset($params['from']) || isset($params['to'])) {
-                throw new Exception('Force convert when we need to seek.');
-            }
-
-            if ($this->config->stream) {
-                return $this->getStream($params['url'], 'mp3', $response, $request, $password);
-            } else {
-                $urls = $this->download->getURL($params['url'], 'mp3[protocol^=http]', $password);
-
-                return $response->withRedirect($urls[0]);
-            }
-        } catch (PasswordException $e) {
-            return $this->password($request, $response);
-        } catch (Exception $e) {
-            return $this->getConvertedAudioResponse($request, $response, $params, $password);
-        }
-    }
-
-    /**
      * Return the video description page.
      *
      * @param Request  $request  PSR-7 request
      * @param Response $response PSR-7 response
-     * @param array    $params   GET query parameters
-     * @param string   $password Video password
      *
      * @return Response HTTP response
      */
-    private function getVideoResponse(Request $request, Response $response, array $params, $password = null)
+    private function getInfoResponse(Request $request, Response $response)
     {
         try {
-            $video = $this->download->getJSON($params['url'], $this->defaultFormat, $password);
+            $this->video->getJson();
         } catch (PasswordException $e) {
             return $this->password($request, $response);
         }
-        if ($this->config->stream) {
-            $protocol = '';
-        } else {
-            $protocol = '[protocol^=http]';
-        }
-        if (isset($video->entries)) {
+
+        if (isset($this->video->entries)) {
             $template = 'playlist.tpl';
         } else {
-            $template = 'video.tpl';
+            $template = 'info.tpl';
         }
         $title = _('Video download');
-        $description = _('Download video from ').$video->extractor_key;
-        if (isset($video->title)) {
-            $title = $video->title;
-            $description = _('Download').' "'.$video->title.'" '._('from').' '.$video->extractor_key;
+        $description = _('Download video from ').$this->video->extractor_key;
+        if (isset($this->video->title)) {
+            $title = $this->video->title;
+            $description = _('Download').' "'.$this->video->title.'" '._('from').' '.$this->video->extractor_key;
         }
         $this->view->render(
             $response,
             $template,
             [
-                'video'       => $video,
-                'class'       => 'video',
-                'title'       => $title,
-                'description' => $description,
-                'protocol'    => $protocol,
-                'config'      => $this->config,
-                'canonical'   => $this->getCanonicalUrl($request),
-                'locale'      => $this->localeManager->getLocale(),
+                'video'         => $this->video,
+                'class'         => 'info',
+                'title'         => $title,
+                'description'   => $description,
+                'config'        => $this->config,
+                'canonical'     => $this->getCanonicalUrl($request),
+                'locale'        => $this->localeManager->getLocale(),
+                'defaultFormat' => $this->defaultFormat,
             ]
         );
 
@@ -342,23 +199,21 @@ class FrontController
      *
      * @return Response HTTP response
      */
-    public function video(Request $request, Response $response)
+    public function info(Request $request, Response $response)
     {
-        $params = $request->getQueryParams();
+        $url = $request->getQueryParam('url') ?: $request->getQueryParam('v');
 
-        if (!isset($params['url']) && isset($params['v'])) {
-            $params['url'] = $params['v'];
-        }
+        if (isset($url) && !empty($url)) {
+            $this->video = new Video($url, $this->getFormat($request), $this->getPassword($request));
 
-        if (isset($params['url']) && !empty($params['url'])) {
-            $password = $request->getParam('password');
-            if (isset($password)) {
-                $this->sessionSegment->setFlash($params['url'], $password);
-            }
-            if (isset($params['audio'])) {
-                return $this->getAudioResponse($request, $response, $params, $password);
+            if ($this->config->convert && $request->getQueryParam('audio')) {
+                // We skip the info page and get directly to the download.
+                return $response->withRedirect(
+                    $this->container->get('router')->pathFor('download').
+                    '?'.http_build_query($request->getQueryParams())
+                );
             } else {
-                return $this->getVideoResponse($request, $response, $params, $password);
+                return $this->getInfoResponse($request, $response);
             }
         } else {
             return $response->withRedirect($this->container->get('router')->pathFor('index'));
