@@ -1495,6 +1495,7 @@
             "name": "ffmpeg/ffmpeg",
             "version": "4.0.3",
             "dist": {
+                "type": "xz",
                 "url": "https://www.johnvansickle.com/ffmpeg/old-releases/ffmpeg-4.0.3-64bit-static.tar.xz"
             },
             "bin": [
